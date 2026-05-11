@@ -29,6 +29,30 @@
     "type": "int",
     "default": 10
   },
+  "daily_summary_enabled": {
+    "name": "启用每日总结",
+    "description": "是否每天定时向已绑定会话推送主页关注、粉丝、获赞等数据的总结分析。",
+    "type": "bool",
+    "default": true
+  },
+  "daily_summary_time": {
+    "name": "每日总结时间",
+    "description": "每天推送总结的服务器本地时间，格式 HH:MM。",
+    "type": "string",
+    "default": "23:55"
+  },
+  "summary_window_days": {
+    "name": "总结分析窗口（天）",
+    "description": "生成总结时对比最近多少天内的首次和最新采样。",
+    "type": "int",
+    "default": 1
+  },
+  "profile_stats_retention_days": {
+    "name": "主页数据保留天数",
+    "description": "关注、粉丝、获赞、作品数等采样历史在状态文件中保留的天数。",
+    "type": "int",
+    "default": 30
+  },
   "download_enabled": {
     "name": "下载媒体",
     "description": "发现新作品后是否下载视频/图集。",

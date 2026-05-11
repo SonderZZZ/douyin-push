@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -14,6 +15,7 @@ from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_douyin_push"
 DOUYIN_POST_API = "https://www.douyin.com/aweme/v1/web/aweme/post/"
+DOUYIN_PROFILE_API = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -21,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.0.0")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.0")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -62,6 +64,14 @@ class DouyinPushPlugin(Star):
     @property
     def _interval(self) -> int:
         return max(60, int(self.config.get("check_interval_seconds", 300)))
+
+    @property
+    def _summary_enabled(self) -> bool:
+        return bool(self.config.get("daily_summary_enabled", True))
+
+    @property
+    def _summary_time(self) -> str:
+        return str(self.config.get("daily_summary_time") or "23:55")
 
     @filter.command("dy_bind", alias={"抖音绑定"})
     async def bind_target(self, event: AstrMessageEvent):
@@ -143,8 +153,18 @@ class DouyinPushPlugin(Star):
             f"监控用户数：{len(users)}",
         ]
         for sec_user_id, info in users.items():
-            lines.append(f"- {info.get('nickname', sec_user_id[-8:])}: 最新 {info.get('latest_aweme_id') or '未初始化'}")
+            stats = info.get("latest_stats") or {}
+            stat_text = self._format_stats_inline(stats) if stats else "暂无主页数据"
+            lines.append(
+                f"- {info.get('nickname', sec_user_id[-8:])}: 最新作品 {info.get('latest_aweme_id') or '未初始化'}；{stat_text}"
+            )
         yield event.plain_result("\n".join(lines))
+
+    @filter.command("dy_summary", alias={"抖音总结"})
+    async def summary_now(self, event: AstrMessageEvent):
+        """立即生成一次主页数据总结分析。"""
+        report = self._build_daily_summary(force=True)
+        yield event.plain_result(report or "暂无可用于总结的主页数据。")
 
     @filter.command("dy_check", alias={"抖音检查"})
     async def check_now(self, event: AstrMessageEvent):
@@ -161,6 +181,7 @@ class DouyinPushPlugin(Star):
         while self._running:
             try:
                 await self._check_all_users(push=True)
+                await self._maybe_push_daily_summary()
             except Exception as exc:  # noqa: BLE001 - background task must not crash the plugin
                 logger.error(f"Douyin monitor loop failed: {exc}")
             await asyncio.sleep(self._interval)
@@ -182,9 +203,16 @@ class DouyinPushPlugin(Star):
         return reports
 
     async def _check_user(self, sec_user_id: str, info: Dict[str, Any], push: bool) -> Optional[str]:
+        profile = await self._safe_fetch_user_profile(sec_user_id)
+        if profile:
+            self._record_profile_stats(sec_user_id, info, profile)
+
         aweme_list = await self._fetch_latest_awemes(sec_user_id)
         if not aweme_list:
             return None
+
+        if not profile:
+            self._record_profile_stats(sec_user_id, info, aweme_list[0].get("author") or {})
 
         nickname = info.get("nickname") or self._author_name(aweme_list[0]) or sec_user_id[-8:]
         info["nickname"] = nickname
@@ -254,6 +282,188 @@ class DouyinPushPlugin(Star):
         if data.get("status_code") not in (0, None):
             raise RuntimeError(data.get("status_msg") or data.get("message") or "Douyin API returned non-zero status")
         return data.get("aweme_list") or []
+
+    async def _safe_fetch_user_profile(self, sec_user_id: str) -> Dict[str, Any]:
+        try:
+            return await self._fetch_user_profile(sec_user_id)
+        except Exception as exc:  # noqa: BLE001 - stats are best-effort and should not block work checks
+            logger.error(f"fetch douyin profile stats failed for {sec_user_id}: {exc}")
+            return {}
+
+    async def _fetch_user_profile(self, sec_user_id: str) -> Dict[str, Any]:
+        client = self._get_client()
+        params = {
+            "device_platform": "webapp",
+            "aid": "6383",
+            "channel": "channel_pc_web",
+            "sec_user_id": sec_user_id,
+            "publish_video_strategy_type": "2",
+            "source": "channel_pc_web",
+            "pc_client_type": "1",
+            "browser_language": "zh-CN",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "124.0.0.0",
+            "os_name": "Windows",
+            "os_version": "10",
+            "platform": "PC",
+        }
+        response = await client.get(DOUYIN_PROFILE_API, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("status_code") not in (0, None):
+            raise RuntimeError(data.get("status_msg") or data.get("message") or "Douyin profile API returned non-zero status")
+        return data.get("user") or data.get("user_info") or data.get("user_info_v2") or data
+
+    async def _maybe_push_daily_summary(self):
+        if not self._summary_enabled:
+            return
+        if not self._is_summary_time_reached():
+            return
+        today = date.today().isoformat()
+        if self._state.get("last_daily_summary_date") == today:
+            return
+        report = self._build_daily_summary(force=True)
+        self._state["last_daily_summary_date"] = today
+        self._save_state()
+        if report:
+            await self._push_text(report)
+
+    def _is_summary_time_reached(self) -> bool:
+        try:
+            hour, minute = [int(part) for part in self._summary_time.split(":", 1)]
+            if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+                raise ValueError
+        except ValueError:
+            hour, minute = 23, 55
+        now = datetime.now()
+        scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return now >= scheduled
+
+    def _record_profile_stats(self, sec_user_id: str, info: Dict[str, Any], profile: Dict[str, Any]):
+        stats = self._extract_profile_stats(profile)
+        if not any(value is not None for key, value in stats.items() if key != "nickname"):
+            return
+
+        nickname = stats.pop("nickname", "")
+        if nickname:
+            info["nickname"] = nickname
+
+        now = datetime.now()
+        entry = {
+            "ts": int(now.timestamp()),
+            "date": now.date().isoformat(),
+            **stats,
+        }
+        info["latest_stats"] = entry
+        history = info.setdefault("stat_history", [])
+        history.append(entry)
+        info["stat_history"] = self._trim_stat_history(history)
+        logger.info(f"recorded douyin profile stats for {sec_user_id}: {stats}")
+
+    def _extract_profile_stats(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+        stats = profile.get("stats") or profile.get("statistics") or {}
+        merged = {**stats, **profile}
+        return {
+            "nickname": merged.get("nickname") or merged.get("unique_id") or "",
+            "following_count": self._pick_int(merged, "following_count", "follow_count"),
+            "follower_count": self._pick_int(merged, "follower_count", "fans_count"),
+            "total_favorited": self._pick_int(merged, "total_favorited", "favoriting_count"),
+            "aweme_count": self._pick_int(merged, "aweme_count", "video_count"),
+        }
+
+    def _trim_stat_history(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        retention_days = max(1, int(self.config.get("profile_stats_retention_days", 30)))
+        cutoff = datetime.now() - timedelta(days=retention_days)
+        cutoff_ts = int(cutoff.timestamp())
+        return [entry for entry in history if int(entry.get("ts") or 0) >= cutoff_ts]
+
+    def _build_daily_summary(self, force: bool) -> str:
+        users: Dict[str, Any] = self._state.get("users", {})
+        window_days = max(1, int(self.config.get("summary_window_days", 1)))
+        cutoff = datetime.now() - timedelta(days=window_days)
+        cutoff_ts = int(cutoff.timestamp())
+        lines = [f"抖音主页数据每日总结（近 {window_days} 天）"]
+        has_data = False
+        for sec_user_id, info in users.items():
+            history = [entry for entry in info.get("stat_history", []) if int(entry.get("ts") or 0) >= cutoff_ts]
+            if len(history) < 2:
+                latest = info.get("latest_stats") or {}
+                if force and latest:
+                    lines.append(f"- {info.get('nickname', sec_user_id[-8:])}: {self._format_stats_inline(latest)}；暂无足够历史数据计算趋势")
+                    has_data = True
+                continue
+
+            first = min(history, key=lambda item: int(item.get("ts") or 0))
+            last = max(history, key=lambda item: int(item.get("ts") or 0))
+            lines.append(self._format_user_summary(info.get("nickname", sec_user_id[-8:]), first, last))
+            has_data = True
+
+        if not has_data:
+            return "" if not force else "暂无可用于总结的主页数据；请等待至少两次监控采样后再生成趋势分析。"
+        return "\n".join(lines)
+
+    def _format_user_summary(self, nickname: str, first: Dict[str, Any], last: Dict[str, Any]) -> str:
+        parts = []
+        for key, label in (
+            ("following_count", "关注"),
+            ("follower_count", "粉丝"),
+            ("total_favorited", "获赞"),
+            ("aweme_count", "作品"),
+        ):
+            current = last.get(key)
+            if current is None:
+                continue
+            parts.append(f"{label} {self._format_number(current)}（{self._format_delta(self._delta(first.get(key), current))}）")
+        return f"- {nickname}: " + "，".join(parts)
+
+    def _format_stats_inline(self, stats: Dict[str, Any]) -> str:
+        parts = []
+        for key, label in (
+            ("following_count", "关注"),
+            ("follower_count", "粉丝"),
+            ("total_favorited", "获赞"),
+            ("aweme_count", "作品"),
+        ):
+            value = stats.get(key)
+            if value is not None:
+                parts.append(f"{label} {self._format_number(value)}")
+        return "，".join(parts) if parts else "暂无主页数据"
+
+    def _delta(self, start: Any, end: Any) -> Optional[int]:
+        start_value = self._to_int(start)
+        end_value = self._to_int(end)
+        if start_value is None or end_value is None:
+            return None
+        return end_value - start_value
+
+    def _format_delta(self, value: Optional[int]) -> str:
+        if value is None:
+            return "无对比"
+        if value > 0:
+            return f"+{self._format_number(value)}"
+        return self._format_number(value)
+
+    def _format_number(self, value: Any) -> str:
+        number = self._to_int(value)
+        if number is None:
+            return "未知"
+        return f"{number:,}"
+
+    def _pick_int(self, data: Dict[str, Any], *keys: str) -> Optional[int]:
+        for key in keys:
+            value = self._to_int(data.get(key))
+            if value is not None:
+                return value
+        return None
+
+    def _to_int(self, value: Any) -> Optional[int]:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     async def _download_aweme(self, item: Dict[str, Any]) -> List[str]:
         aweme_id = str(item.get("aweme_id") or int(time.time()))
