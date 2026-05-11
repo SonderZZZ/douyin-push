@@ -5,7 +5,7 @@
 ## 功能
 
 - 通过 `sec_user_id` 或抖音用户主页链接添加监控用户。
-- 后台定时检查用户主页最新作品。
+- 后台定时检查用户主页最新作品，并按发布时间排序识别更新，避免置顶作品长期占据第一条导致漏推。
 - 支持把当前聊天会话绑定为主动推送目标。
 - 支持下载新作品的视频/图片到 `data/plugins/astrbot_plugin_douyin_push/downloads`（可配置）。
 - 同步记录用户主页关注数、粉丝数、获赞数和作品数，并按配置每天定时推送总结分析。
@@ -48,7 +48,7 @@ MS4wLjABAAAAxxxxxxxxxxxxxxxxxxxx 用户备注
 https://www.douyin.com/user/MS4wLjABAAAAyyyyyyyyyyyyyyyyyyyy 另一个用户
 ```
 
-首次运行默认只记录最新作品，不推送历史内容；如果希望首次也推送拉取到的作品，可开启 `notify_existing_on_first_run`。
+首次运行默认只记录最新作品，不推送历史内容；如果希望首次也推送拉取到的作品，可开启 `notify_existing_on_first_run`。后续判断更新时不会只看第一条作品 ID，而是按 `create_time` 发布时间排序，并结合 `seen_aweme_ids` 去重；如果作者长期有置顶作品，建议适当调大 `fetch_count` 和 `seen_aweme_history_limit`。
 
 每日总结默认在服务器本地时间 `23:55` 推送到已绑定会话，可通过 `daily_summary_time` 调整；总结会对比 `summary_window_days` 窗口内首次和最新采样，展示关注、粉丝、获赞、作品数的当前值和变化量。
 

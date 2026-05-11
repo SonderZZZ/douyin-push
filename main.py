@@ -23,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.1")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.2")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -73,6 +73,10 @@ class DouyinPushPlugin(Star):
     @property
     def _summary_time(self) -> str:
         return str(self.config.get("daily_summary_time") or "23:55")
+
+    @property
+    def _history_limit(self) -> int:
+        return max(50, int(self.config.get("seen_aweme_history_limit", 200)))
 
     @filter.command("dy_bind", alias={"抖音绑定"})
     async def bind_target(self, event: AstrMessageEvent):
@@ -170,6 +174,7 @@ class DouyinPushPlugin(Star):
         lines = [
             f"抖音监控：{'启用' if self._enabled else '停用'}",
             f"检查间隔：{self._interval} 秒",
+            f"作品去重历史上限：{self._history_limit} 条",
             f"推送会话数：{len(targets)}",
             f"监控用户数：{len(users)}",
         ]
@@ -177,7 +182,8 @@ class DouyinPushPlugin(Star):
             stats = info.get("latest_stats") or {}
             stat_text = self._format_stats_inline(stats) if stats else "暂无主页数据"
             lines.append(
-                f"- {info.get('nickname', sec_user_id[-8:])}: 最新作品 {info.get('latest_aweme_id') or '未初始化'}；{stat_text}"
+                f"- {info.get('nickname', sec_user_id[-8:])}: 最新发布 {self._format_timestamp(info.get('latest_publish_time'))}，"
+                f"作品 {info.get('latest_aweme_id') or '未初始化'}；{stat_text}"
             )
         yield event.plain_result("\n".join(lines))
 
@@ -237,30 +243,38 @@ class DouyinPushPlugin(Star):
 
         nickname = info.get("nickname") or self._author_name(aweme_list[0]) or sec_user_id[-8:]
         info["nickname"] = nickname
-        latest_known = str(info.get("latest_aweme_id") or "")
         known_ids: Set[str] = set(str(i) for i in info.get("seen_aweme_ids", []))
         current_ids = [str(item.get("aweme_id")) for item in aweme_list if item.get("aweme_id")]
         if not current_ids:
             return None
 
-        if not latest_known and not known_ids:
-            info["latest_aweme_id"] = current_ids[0]
-            info["seen_aweme_ids"] = current_ids[:50]
+        sorted_items = self._sort_awemes_by_publish_time(aweme_list)
+        latest_item = sorted_items[0]
+        latest_aweme_id = str(latest_item.get("aweme_id") or current_ids[0])
+        latest_publish_time = self._aweme_publish_time(latest_item)
+        last_publish_time = int(info.get("latest_publish_time") or 0)
+        if not last_publish_time and known_ids:
+            last_publish_time = self._infer_latest_known_publish_time(sorted_items, known_ids)
+
+        if not last_publish_time and not known_ids:
+            info["latest_aweme_id"] = latest_aweme_id
+            info["latest_publish_time"] = latest_publish_time
+            info["seen_aweme_ids"] = current_ids[: self._history_limit]
             if not bool(self.config.get("notify_existing_on_first_run", False)):
                 return None
 
-        new_items = [item for item in aweme_list if str(item.get("aweme_id")) not in known_ids]
-        if latest_known:
-            trimmed: List[Dict[str, Any]] = []
-            for item in new_items:
-                if str(item.get("aweme_id")) == latest_known:
-                    break
-                trimmed.append(item)
-            new_items = trimmed
+        new_items = [
+            item
+            for item in sorted_items
+            if item.get("aweme_id")
+            and str(item.get("aweme_id")) not in known_ids
+            and self._aweme_publish_time(item) >= last_publish_time
+        ]
 
         if not new_items:
-            info["latest_aweme_id"] = current_ids[0]
-            info["seen_aweme_ids"] = current_ids[:50]
+            info["latest_aweme_id"] = latest_aweme_id
+            info["latest_publish_time"] = max(last_publish_time, latest_publish_time)
+            info["seen_aweme_ids"] = self._merge_seen_aweme_ids(current_ids, known_ids)
             return None
 
         new_items.reverse()
@@ -272,9 +286,27 @@ class DouyinPushPlugin(Star):
             if push:
                 await self._push_text(text)
 
-        info["latest_aweme_id"] = current_ids[0]
-        info["seen_aweme_ids"] = list(dict.fromkeys(current_ids + list(known_ids)))[:50]
+        info["latest_aweme_id"] = latest_aweme_id
+        info["latest_publish_time"] = max(last_publish_time, latest_publish_time)
+        info["seen_aweme_ids"] = self._merge_seen_aweme_ids(current_ids, known_ids)
         return "\n\n".join(messages)
+
+    def _sort_awemes_by_publish_time(self, aweme_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            aweme_list,
+            key=lambda item: (self._aweme_publish_time(item), str(item.get("aweme_id") or "")),
+            reverse=True,
+        )
+
+    def _aweme_publish_time(self, item: Dict[str, Any]) -> int:
+        return self._to_int(item.get("create_time")) or 0
+
+    def _infer_latest_known_publish_time(self, sorted_items: List[Dict[str, Any]], known_ids: Set[str]) -> int:
+        known_times = [self._aweme_publish_time(item) for item in sorted_items if str(item.get("aweme_id")) in known_ids]
+        return max(known_times, default=0)
+
+    def _merge_seen_aweme_ids(self, current_ids: List[str], known_ids: Set[str]) -> List[str]:
+        return list(dict.fromkeys(current_ids + list(known_ids)))[: self._history_limit]
 
     async def _fetch_latest_awemes(self, sec_user_id: str) -> List[Dict[str, Any]]:
         client = self._get_client()
@@ -544,6 +576,12 @@ class DouyinPushPlugin(Star):
         for image in item.get("images") or []:
             urls.extend(image.get("url_list") or [])
         return list(dict.fromkeys(urls))[: int(self.config.get("max_download_files_per_aweme", 10))]
+
+    def _format_timestamp(self, value: Any) -> str:
+        timestamp = self._to_int(value)
+        if not timestamp:
+            return "未初始化"
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
     def _format_aweme_message(self, nickname: str, item: Dict[str, Any], downloaded: List[str]) -> str:
         aweme_id = str(item.get("aweme_id") or "")

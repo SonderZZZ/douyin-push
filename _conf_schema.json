@@ -35,6 +35,12 @@
     "type": "int",
     "default": 10
   },
+  "seen_aweme_history_limit": {
+    "name": "作品去重历史上限",
+    "description": "保存最近多少个作品 ID 用于去重。置顶作品可能长期占据首页，建议保持大于每次获取作品数。",
+    "type": "int",
+    "default": 200
+  },
   "daily_summary_enabled": {
     "name": "启用每日总结",
     "description": "是否每天定时向已绑定会话推送主页关注、粉丝、获赞等数据的总结分析。",
