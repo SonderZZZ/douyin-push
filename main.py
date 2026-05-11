@@ -23,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.0")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.1")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -31,6 +31,7 @@ class DouyinPushPlugin(Star):
         self.data_dir = Path("data") / "plugins" / PLUGIN_NAME
         self.download_dir = Path(str(self.config.get("download_dir") or self.data_dir / "downloads"))
         self.state_path = self.data_dir / "state.json"
+        self.cookie_path = Path(str(self.config.get("cookie_file") or self.data_dir / "douyin_cookie.txt"))
         self._state: Dict[str, Any] = {"users": {}, "targets": []}
         self._task: Optional[asyncio.Task] = None
         self._client: Optional[httpx.AsyncClient] = None
@@ -140,6 +141,26 @@ class DouyinPushPlugin(Star):
         users.pop(target, None)
         self._save_state()
         yield event.plain_result(f"已移除监控：{nickname}")
+
+    @filter.command("dy_cookie_status", alias={"抖音Cookie状态"})
+    async def cookie_status(self, event: AstrMessageEvent):
+        """查看抖音 Cookie 配置/文件状态。"""
+        source = "配置项 cookie" if str(self.config.get("cookie") or "").strip() else f"Cookie 文件 {self.cookie_path}"
+        cookie = self._cookie_value()
+        status = "已读取" if cookie else "未配置"
+        yield event.plain_result(
+            f"抖音 Cookie 状态：{status}\n"
+            f"来源：{source}\n"
+            "如果接口返回 HTML/空内容，请更新 Cookie；可在插件目录运行 scripts/douyin_cookie_login.py 扫码生成 Cookie 文件。"
+        )
+
+    @filter.command("dy_reload_cookie", alias={"抖音重载Cookie"})
+    async def reload_cookie(self, event: AstrMessageEvent):
+        """重载 Cookie 文件/配置，并重建 HTTP 客户端。"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+        yield event.plain_result("已重载抖音 Cookie，后续请求会使用最新 Cookie。")
 
     @filter.command("dy_status", alias={"抖音状态"})
     async def status(self, event: AstrMessageEvent):
@@ -278,10 +299,35 @@ class DouyinPushPlugin(Star):
         }
         response = await client.get(DOUYIN_POST_API, params=params)
         response.raise_for_status()
-        data = response.json()
+        data = await self._read_json_response(response, "作品列表")
         if data.get("status_code") not in (0, None):
             raise RuntimeError(data.get("status_msg") or data.get("message") or "Douyin API returned non-zero status")
         return data.get("aweme_list") or []
+
+
+    async def _read_json_response(self, response: httpx.Response, scene: str) -> Dict[str, Any]:
+        content_type = response.headers.get("content-type", "")
+        text = response.text
+        try:
+            data = response.json()
+        except json.JSONDecodeError as exc:
+            preview = self._response_preview(text)
+            message = (
+                f"抖音{scene}接口未返回 JSON（HTTP {response.status_code}, Content-Type: {content_type or '未知'}）。"
+                "这通常是 Cookie 失效/缺失、触发登录页或风控导致的；请更新 Cookie 后执行 /dy_reload_cookie。"
+            )
+            if preview:
+                message += f" 响应片段：{preview}"
+            raise RuntimeError(message) from exc
+        if not isinstance(data, dict):
+            raise RuntimeError(f"抖音{scene}接口返回了非对象 JSON，请检查 Cookie 或接口是否变更。")
+        return data
+
+    def _response_preview(self, text: str) -> str:
+        cleaned = " ".join(text.strip().split())
+        if not cleaned:
+            return "空响应"
+        return cleaned[:160]
 
     async def _safe_fetch_user_profile(self, sec_user_id: str) -> Dict[str, Any]:
         try:
@@ -310,7 +356,7 @@ class DouyinPushPlugin(Star):
         }
         response = await client.get(DOUYIN_PROFILE_API, params=params)
         response.raise_for_status()
-        data = response.json()
+        data = await self._read_json_response(response, "主页数据")
         if data.get("status_code") not in (0, None):
             raise RuntimeError(data.get("status_msg") or data.get("message") or "Douyin profile API returned non-zero status")
         return data.get("user") or data.get("user_info") or data.get("user_info_v2") or data
@@ -531,11 +577,20 @@ class DouyinPushPlugin(Star):
                 "Referer": "https://www.douyin.com/",
                 "Accept": "application/json, text/plain, */*",
             }
-            cookie = str(self.config.get("cookie") or "").strip()
+            cookie = self._cookie_value()
             if cookie:
                 headers["Cookie"] = cookie
             self._client = httpx.AsyncClient(headers=headers, timeout=float(self.config.get("request_timeout", 20)))
         return self._client
+
+    def _cookie_value(self) -> str:
+        configured_cookie = str(self.config.get("cookie") or "").strip()
+        if configured_cookie:
+            return configured_cookie
+        try:
+            return self.cookie_path.read_text("utf-8").strip()
+        except OSError:
+            return ""
 
     def _load_state(self):
         if not self.state_path.exists():

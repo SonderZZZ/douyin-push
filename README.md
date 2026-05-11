@@ -11,7 +11,7 @@
 - 同步记录用户主页关注数、粉丝数、获赞数和作品数，并按配置每天定时推送总结分析。
 - 状态保存到 `data/plugins/astrbot_plugin_douyin_push/state.json`，避免插件更新时覆盖数据。
 
-> 注意：抖音 Web 接口可能调整或触发风控。建议在 WebUI 配置中填写自己的 `douyin.com` Cookie，并设置合理的检查间隔。请仅监控和下载你有权访问、保存的内容。
+> 注意：抖音 Web 接口可能调整或触发风控。建议在 WebUI 配置中填写自己的 `douyin.com` Cookie，或使用扫码脚本生成 Cookie 文件，并设置合理的检查间隔。请仅监控和下载你有权访问、保存的内容。
 
 ## 安装
 
@@ -22,8 +22,22 @@
 pip install -r requirements.txt
 ```
 
-3. 在插件配置页填写 `monitored_users`、`cookie` 等配置。
+3. 在插件配置页填写 `monitored_users`、`cookie` 等配置；如果不想手动复制 Cookie，可按下方“扫码获取 Cookie”生成 Cookie 文件。
 4. 重载插件。
+
+## 扫码获取 Cookie
+
+如果 `/dy_check` 返回“接口未返回 JSON”、响应片段像 HTML 登录页，通常是 Cookie 缺失/失效或触发风控。可以用真实 Chromium 浏览器扫码登录并导出 Cookie：
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium
+python scripts/douyin_cookie_login.py
+```
+
+脚本会打开抖音网页版。请在浏览器中点击登录并用抖音 App 扫码确认；登录完成后回到终端按 Enter，Cookie 会默认写入 `data/plugins/astrbot_plugin_douyin_push/douyin_cookie.txt`。如果插件已经在运行，请发送 `/dy_reload_cookie` 让插件重建 HTTP 客户端，再发送 `/dy_check` 验证。
+
+也可以发送 `/dy_cookie_status` 查看当前插件是否读取到了配置项 Cookie 或 Cookie 文件。
 
 ## 配置示例
 
@@ -46,6 +60,8 @@ https://www.douyin.com/user/MS4wLjABAAAAyyyyyyyyyyyyyyyyyyyy 另一个用户
 | `/dy_unbind` 或 `/抖音解绑` | 取消当前会话推送。 |
 | `/dy_add <sec_user_id/主页链接> [备注]` 或 `/抖音添加 ...` | 添加监控用户。 |
 | `/dy_remove <sec_user_id/备注>` 或 `/抖音删除 ...` | 移除监控用户。 |
+| `/dy_cookie_status` 或 `/抖音Cookie状态` | 查看 Cookie 配置/文件读取状态。 |
+| `/dy_reload_cookie` 或 `/抖音重载Cookie` | 扫码脚本更新 Cookie 文件后，重建 HTTP 客户端。 |
 | `/dy_status` 或 `/抖音状态` | 查看监控状态和最近一次主页数据。 |
 | `/dy_summary` 或 `/抖音总结` | 立即生成一次主页数据总结分析。 |
 | `/dy_check` 或 `/抖音检查` | 立即检查一次，不主动推送到其它会话，只把结果回复当前会话。 |

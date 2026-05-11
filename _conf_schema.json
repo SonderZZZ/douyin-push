@@ -17,6 +17,12 @@
     "type": "string",
     "default": ""
   },
+  "cookie_file": {
+    "name": "Cookie 文件路径",
+    "description": "当 cookie 配置为空时，从该文件读取 Cookie；扫码脚本默认会写入 data/plugins/astrbot_plugin_douyin_push/douyin_cookie.txt。",
+    "type": "string",
+    "default": "data/plugins/astrbot_plugin_douyin_push/douyin_cookie.txt"
+  },
   "check_interval_seconds": {
     "name": "检查间隔（秒）",
     "description": "后台轮询间隔。为降低风控风险，最小会按 60 秒处理。",
