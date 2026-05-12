@@ -23,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.4")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.5")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -43,9 +43,7 @@ class DouyinPushPlugin(Star):
         self._load_state()
         self._merge_config_users()
         if self._enabled:
-            self._running = True
-            self._task = asyncio.create_task(self._monitor_loop())
-            logger.info("DouyinPushPlugin monitor task started")
+            self._ensure_monitor_task()
 
     async def terminate(self):
         self._running = False
@@ -81,6 +79,10 @@ class DouyinPushPlugin(Star):
     @property
     def _history_limit(self) -> int:
         return max(50, int(self.config.get("seen_aweme_history_limit", 200)))
+
+    @property
+    def _manual_check_push_enabled(self) -> bool:
+        return bool(self.config.get("manual_check_push_enabled", True))
 
     @filter.command("dy_bind", alias={"抖音绑定"})
     async def bind_target(self, event: AstrMessageEvent):
@@ -181,6 +183,10 @@ class DouyinPushPlugin(Star):
             f"作品去重历史上限：{self._history_limit} 条",
             f"每日总结：{'启用' if self._summary_enabled else '停用'}，时间 {self._summary_time}({self._summary_utc_offset})，"
             f"上次发送 {self._state.get('last_daily_summary_date') or '未发送'}",
+            f"后台任务：{self._monitor_task_status()}",
+            f"上次后台检查：{self._state.get('last_monitor_check_at') or '未执行'}；"
+            f"结果 {self._state.get('last_monitor_result') or '无'}",
+            f"手动检查发现新作品时推送：{'启用' if self._manual_check_push_enabled else '停用'}",
             f"推送会话数：{len(targets)}",
             f"监控用户数：{len(users)}",
         ]
@@ -202,8 +208,9 @@ class DouyinPushPlugin(Star):
     @filter.command("dy_check", alias={"抖音检查"})
     async def check_now(self, event: AstrMessageEvent):
         """立即检查一次抖音更新。"""
+        self._ensure_monitor_task()
         yield event.plain_result("开始检查抖音更新，请稍候……")
-        reports = await self._check_all_users(push=False, verbose=True)
+        reports = await self._check_all_users(push=self._manual_check_push_enabled, verbose=True, source="manual")
         summary_result = await self._maybe_push_daily_summary(trigger="manual_check")
         lines = [self._format_check_overview()]
         if reports:
@@ -218,25 +225,29 @@ class DouyinPushPlugin(Star):
         await asyncio.sleep(5)
         while self._running:
             try:
-                await self._check_all_users(push=True)
+                await self._check_all_users(push=True, source="monitor")
                 await self._maybe_push_daily_summary(trigger="schedule")
             except Exception as exc:  # noqa: BLE001 - background task must not crash the plugin
                 logger.error(f"Douyin monitor loop failed: {exc}")
             await asyncio.sleep(self._interval)
 
-    async def _check_all_users(self, push: bool, verbose: bool = False) -> List[str]:
+    async def _check_all_users(self, push: bool, verbose: bool = False, source: str = "manual") -> List[str]:
         users: Dict[str, Any] = self._state.setdefault("users", {})
         reports: List[str] = []
+        errors = 0
         for sec_user_id, info in list(users.items()):
             try:
                 report = await self._check_user(sec_user_id, info, push=push, verbose=verbose)
                 if report:
                     reports.append(report)
             except Exception as exc:  # noqa: BLE001 - keep checking other users
+                errors += 1
                 nickname = info.get("nickname", sec_user_id[-8:])
                 message = f"检查 {nickname} 失败：{exc}"
                 logger.error(message)
                 reports.append(message)
+        self._state[f"last_{source}_check_at"] = datetime.now().isoformat(timespec="seconds")
+        self._state[f"last_{source}_result"] = f"{len(reports)} 条结果，{errors} 个失败"
         self._save_state()
         return reports
 
@@ -292,25 +303,70 @@ class DouyinPushPlugin(Star):
 
         new_items.reverse()
         messages = []
+        push_success_total = 0
+        push_attempt_total = 0
         for item in new_items:
             downloaded = await self._download_aweme(item) if bool(self.config.get("download_enabled", True)) else []
             text = self._format_aweme_message(nickname, item, downloaded)
             messages.append(text)
             if push:
-                await self._push_text(text)
+                target_count = len(self._state.get("targets", []))
+                push_attempt_total += target_count
+                push_success_total += await self._push_text(text)
+
+        prefix = f"{nickname}：发现 {len(new_items)} 个新作品。"
+        if push:
+            if push_attempt_total <= 0:
+                prefix += " 但没有绑定推送会话，未更新水位线；请先在目标会话发送 /dy_bind 后再次检查。"
+                return prefix + "\n" + "\n\n".join(messages)
+            if push_success_total <= 0:
+                prefix += f" 推送 0/{push_attempt_total} 条会话消息，未更新水位线；请检查绑定会话是否可用。"
+                return prefix + "\n" + "\n\n".join(messages)
+            prefix += f" 已推送 {push_success_total}/{push_attempt_total} 条会话消息。"
+        else:
+            prefix += " 本次仅检查不推送，若要手动检查时也推送，请开启 manual_check_push_enabled。"
 
         info["latest_aweme_id"] = latest_aweme_id
         info["latest_publish_time"] = max(last_publish_time, latest_publish_time)
         info["seen_aweme_ids"] = self._merge_seen_aweme_ids(current_ids, known_ids)
-        prefix = f"{nickname}：发现 {len(new_items)} 个新作品。"
         return prefix + "\n" + "\n\n".join(messages)
 
     def _format_check_overview(self) -> str:
         users = self._state.get("users", {})
         return (
             f"检查完成：监控用户 {len(users)} 个，推送会话 {len(self._state.get('targets', []))} 个，"
+            f"后台任务 {self._monitor_task_status()}，"
+            f"手动发现新作品推送 {'启用' if self._manual_check_push_enabled else '停用'}，"
             f"每日总结 {'启用' if self._summary_enabled else '停用'}（{self._summary_time} {self._summary_utc_offset}）。"
         )
+
+    def _ensure_monitor_task(self):
+        if not self._enabled:
+            return
+        if self._task and not self._task.done():
+            self._running = True
+            return
+        if self._task and self._task.done():
+            try:
+                self._task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - restart after unexpected background failure
+                logger.error(f"Douyin monitor task stopped unexpectedly and will restart: {exc}")
+        self._running = True
+        self._task = asyncio.create_task(self._monitor_loop())
+        logger.info("DouyinPushPlugin monitor task started")
+
+    def _monitor_task_status(self) -> str:
+        if not self._enabled:
+            return "停用"
+        if not self._task:
+            return "未启动"
+        if self._task.cancelled():
+            return "已取消"
+        if self._task.done():
+            return "已停止"
+        return "运行中"
 
     def _format_no_change_report(self, nickname: str, info: Dict[str, Any], reason: str) -> str:
         return (

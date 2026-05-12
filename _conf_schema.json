@@ -41,6 +41,12 @@
     "type": "int",
     "default": 200
   },
+  "manual_check_push_enabled": {
+    "name": "手动检查时推送新作品",
+    "description": "开启后，/dy_check 发现新作品也会推送到已绑定会话，并只有推送成功后才更新作品水位线，避免手动检查吃掉待推送作品。",
+    "type": "bool",
+    "default": true
+  },
   "daily_summary_enabled": {
     "name": "启用每日总结",
     "description": "是否每天定时向已绑定会话推送主页关注、粉丝、获赞等数据的总结分析。",
