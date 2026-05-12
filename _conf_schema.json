@@ -1,0 +1,116 @@
+{
+  "enabled": {
+    "name": "启用监控",
+    "description": "是否启动后台定时监控任务。",
+    "type": "bool",
+    "default": true
+  },
+  "monitored_users": {
+    "name": "监控用户",
+    "description": "每行一个 sec_user_id 或抖音用户主页链接，可在后面用空格追加备注名。也可用 /dy_add 动态添加。",
+    "type": "text",
+    "default": ""
+  },
+  "cookie": {
+    "name": "抖音 Cookie",
+    "description": "可选。填写浏览器中的 douyin.com Cookie 可提高接口成功率；请勿泄露。",
+    "type": "string",
+    "default": ""
+  },
+  "cookie_file": {
+    "name": "Cookie 文件路径",
+    "description": "当 cookie 配置为空时，从该文件读取 Cookie；扫码脚本默认会写入 data/plugins/astrbot_plugin_douyin_push/douyin_cookie.txt。",
+    "type": "string",
+    "default": "data/plugins/astrbot_plugin_douyin_push/douyin_cookie.txt"
+  },
+  "check_interval_seconds": {
+    "name": "检查间隔（秒）",
+    "description": "后台轮询间隔。为降低风控风险，最小会按 60 秒处理。",
+    "type": "int",
+    "default": 300
+  },
+  "fetch_count": {
+    "name": "每次获取作品数",
+    "description": "每个用户每次检查拉取的最新作品数量。",
+    "type": "int",
+    "default": 10
+  },
+  "seen_aweme_history_limit": {
+    "name": "作品去重历史上限",
+    "description": "保存最近多少个作品 ID 用于去重。置顶作品可能长期占据首页，建议保持大于每次获取作品数。",
+    "type": "int",
+    "default": 200
+  },
+  "manual_check_push_enabled": {
+    "name": "手动检查时推送新作品",
+    "description": "开启后，/dy_check 发现新作品也会推送到已绑定会话，并只有推送成功后才更新作品水位线，避免手动检查吃掉待推送作品。",
+    "type": "bool",
+    "default": true
+  },
+  "daily_summary_enabled": {
+    "name": "启用每日总结",
+    "description": "是否每天定时向已绑定会话推送主页关注、粉丝、获赞等数据的总结分析。",
+    "type": "bool",
+    "default": true
+  },
+  "daily_summary_time": {
+    "name": "每日总结时间",
+    "description": "每天推送总结的时间，格式 HH:MM；具体时区由 daily_summary_utc_offset 指定。",
+    "type": "string",
+    "default": "23:55"
+  },
+  "daily_summary_utc_offset": {
+    "name": "每日总结时区偏移",
+    "description": "每日总结时间使用的 UTC 偏移，格式如 +08:00。默认按北京时间判断，避免服务器运行在 UTC 时错过预期时间。",
+    "type": "string",
+    "default": "+08:00"
+  },
+  "summary_window_days": {
+    "name": "总结分析窗口（天）",
+    "description": "生成总结时对比最近多少天内的首次和最新采样。",
+    "type": "int",
+    "default": 1
+  },
+  "profile_stats_retention_days": {
+    "name": "主页数据保留天数",
+    "description": "关注、粉丝、获赞、作品数等采样历史在状态文件中保留的天数。",
+    "type": "int",
+    "default": 30
+  },
+  "download_enabled": {
+    "name": "下载媒体",
+    "description": "发现新作品后是否下载视频/图集。",
+    "type": "bool",
+    "default": true
+  },
+  "download_dir": {
+    "name": "下载目录",
+    "description": "下载文件保存目录；留空时使用 data/plugins/astrbot_plugin_douyin_push/downloads。",
+    "type": "string",
+    "default": ""
+  },
+  "max_download_files_per_aweme": {
+    "name": "单作品最大下载文件数",
+    "description": "限制图集等多媒体作品的下载文件数。",
+    "type": "int",
+    "default": 10
+  },
+  "notify_existing_on_first_run": {
+    "name": "首次运行推送已有作品",
+    "description": "默认首次只记录最新作品，不推送历史内容；开启后会推送首次拉取到的作品。",
+    "type": "bool",
+    "default": false
+  },
+  "request_timeout": {
+    "name": "请求超时（秒）",
+    "description": "访问抖音接口和下载媒体时的 HTTP 超时时间。",
+    "type": "int",
+    "default": 20
+  },
+  "user_agent": {
+    "name": "User-Agent",
+    "description": "自定义访问抖音接口时使用的浏览器 UA。通常保持默认即可。",
+    "type": "string",
+    "default": ""
+  }
+}
