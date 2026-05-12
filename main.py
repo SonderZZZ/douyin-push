@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, register
 
@@ -23,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.5")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.6")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -172,6 +172,22 @@ class DouyinPushPlugin(Star):
             self._client = None
         yield event.plain_result("已重载抖音 Cookie，后续请求会使用最新 Cookie。")
 
+    @filter.command("dy_push_test", alias={"抖音推送测试"})
+    async def push_test(self, event: AstrMessageEvent):
+        """向当前会话发起一次主动推送测试。"""
+        origin = event.unified_msg_origin
+        targets: List[str] = self._state.setdefault("targets", [])
+        if origin not in targets:
+            targets.append(origin)
+            self._save_state()
+        sent_count = await self._push_text("抖音监控主动推送测试：如果你看到这条消息，说明当前会话可以接收主动推送。", origins=[origin])
+        self._save_state()
+        if sent_count > 0:
+            yield event.plain_result("主动推送测试成功，当前会话已绑定。")
+        else:
+            last_error = (self._state.get("last_push_errors") or {}).get(origin, "未知错误")
+            yield event.plain_result(f"主动推送测试失败：{last_error}")
+
     @filter.command("dy_status", alias={"抖音状态"})
     async def status(self, event: AstrMessageEvent):
         """查看抖音监控状态。"""
@@ -188,6 +204,7 @@ class DouyinPushPlugin(Star):
             f"结果 {self._state.get('last_monitor_result') or '无'}",
             f"手动检查发现新作品时推送：{'启用' if self._manual_check_push_enabled else '停用'}",
             f"推送会话数：{len(targets)}",
+            f"最近主动推送错误数：{len(self._state.get('last_push_errors') or {})}",
             f"监控用户数：{len(users)}",
         ]
         for sec_user_id, info in users.items():
@@ -501,6 +518,7 @@ class DouyinPushPlugin(Star):
         if sent_count <= 0:
             message = "每日总结发送失败：所有绑定会话推送都失败，今天不会标记为已发送。"
             logger.error(message)
+            self._save_state()
             return message if trigger == "manual_check" else ""
 
         self._state["last_daily_summary_date"] = today
@@ -721,15 +739,26 @@ class DouyinPushPlugin(Star):
             lines.extend(f"- {path}" for path in downloaded)
         return "\n".join(lines)
 
-    async def _push_text(self, text: str) -> int:
+    async def _push_text(self, text: str, origins: Optional[List[str]] = None) -> int:
         sent_count = 0
-        for origin in list(self._state.get("targets", [])):
+        push_errors: Dict[str, str] = self._state.setdefault("last_push_errors", {})
+        for origin in list(origins if origins is not None else self._state.get("targets", [])):
             try:
-                await self.context.send_message(origin, [Comp.Plain(text=text)])
+                await self._send_active_message(origin, text)
                 sent_count += 1
+                push_errors.pop(origin, None)
             except Exception as exc:  # noqa: BLE001 - keep other targets available
-                logger.error(f"push douyin update to {origin} failed: {exc}")
+                error_text = f"{type(exc).__name__}: {exc}"
+                push_errors[origin] = error_text
+                logger.error(f"push douyin update to {origin} failed: {error_text}")
         return sent_count
+
+    async def _send_active_message(self, origin: str, text: str):
+        try:
+            await self.context.send_message(origin, MessageChain().message(text))
+        except Exception as chain_exc:
+            logger.warning(f"send MessageChain to {origin} failed, fallback to plain component list: {chain_exc}")
+            await self.context.send_message(origin, [Comp.Plain(text)])
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
