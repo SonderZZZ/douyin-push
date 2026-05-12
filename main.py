@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -23,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.2")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.4")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -73,6 +73,10 @@ class DouyinPushPlugin(Star):
     @property
     def _summary_time(self) -> str:
         return str(self.config.get("daily_summary_time") or "23:55")
+
+    @property
+    def _summary_utc_offset(self) -> str:
+        return str(self.config.get("daily_summary_utc_offset") or "+08:00")
 
     @property
     def _history_limit(self) -> int:
@@ -175,6 +179,8 @@ class DouyinPushPlugin(Star):
             f"抖音监控：{'启用' if self._enabled else '停用'}",
             f"检查间隔：{self._interval} 秒",
             f"作品去重历史上限：{self._history_limit} 条",
+            f"每日总结：{'启用' if self._summary_enabled else '停用'}，时间 {self._summary_time}({self._summary_utc_offset})，"
+            f"上次发送 {self._state.get('last_daily_summary_date') or '未发送'}",
             f"推送会话数：{len(targets)}",
             f"监控用户数：{len(users)}",
         ]
@@ -197,28 +203,33 @@ class DouyinPushPlugin(Star):
     async def check_now(self, event: AstrMessageEvent):
         """立即检查一次抖音更新。"""
         yield event.plain_result("开始检查抖音更新，请稍候……")
-        reports = await self._check_all_users(push=False)
+        reports = await self._check_all_users(push=False, verbose=True)
+        summary_result = await self._maybe_push_daily_summary(trigger="manual_check")
+        lines = [self._format_check_overview()]
         if reports:
-            yield event.plain_result("\n\n".join(reports))
+            lines.extend(reports)
         else:
-            yield event.plain_result("检查完成，暂无新作品。")
+            lines.append("没有监控用户，或本次没有可展示的检查结果。")
+        if summary_result:
+            lines.append(summary_result)
+        yield event.plain_result("\n".join(lines))
 
     async def _monitor_loop(self):
         await asyncio.sleep(5)
         while self._running:
             try:
                 await self._check_all_users(push=True)
-                await self._maybe_push_daily_summary()
+                await self._maybe_push_daily_summary(trigger="schedule")
             except Exception as exc:  # noqa: BLE001 - background task must not crash the plugin
                 logger.error(f"Douyin monitor loop failed: {exc}")
             await asyncio.sleep(self._interval)
 
-    async def _check_all_users(self, push: bool) -> List[str]:
+    async def _check_all_users(self, push: bool, verbose: bool = False) -> List[str]:
         users: Dict[str, Any] = self._state.setdefault("users", {})
         reports: List[str] = []
         for sec_user_id, info in list(users.items()):
             try:
-                report = await self._check_user(sec_user_id, info, push=push)
+                report = await self._check_user(sec_user_id, info, push=push, verbose=verbose)
                 if report:
                     reports.append(report)
             except Exception as exc:  # noqa: BLE001 - keep checking other users
@@ -229,14 +240,14 @@ class DouyinPushPlugin(Star):
         self._save_state()
         return reports
 
-    async def _check_user(self, sec_user_id: str, info: Dict[str, Any], push: bool) -> Optional[str]:
+    async def _check_user(self, sec_user_id: str, info: Dict[str, Any], push: bool, verbose: bool = False) -> Optional[str]:
         profile = await self._safe_fetch_user_profile(sec_user_id)
         if profile:
             self._record_profile_stats(sec_user_id, info, profile)
 
         aweme_list = await self._fetch_latest_awemes(sec_user_id)
         if not aweme_list:
-            return None
+            return self._format_no_change_report(info.get("nickname", sec_user_id[-8:]), info, "未获取到作品列表。") if verbose else None
 
         if not profile:
             self._record_profile_stats(sec_user_id, info, aweme_list[0].get("author") or {})
@@ -246,7 +257,7 @@ class DouyinPushPlugin(Star):
         known_ids: Set[str] = set(str(i) for i in info.get("seen_aweme_ids", []))
         current_ids = [str(item.get("aweme_id")) for item in aweme_list if item.get("aweme_id")]
         if not current_ids:
-            return None
+            return self._format_no_change_report(nickname, info, "作品列表中没有有效作品 ID。") if verbose else None
 
         sorted_items = self._sort_awemes_by_publish_time(aweme_list)
         latest_item = sorted_items[0]
@@ -261,6 +272,8 @@ class DouyinPushPlugin(Star):
             info["latest_publish_time"] = latest_publish_time
             info["seen_aweme_ids"] = current_ids[: self._history_limit]
             if not bool(self.config.get("notify_existing_on_first_run", False)):
+                if verbose:
+                    return self._format_no_change_report(nickname, info, "首次初始化完成，本次只记录水位线，不推送历史作品。")
                 return None
 
         new_items = [
@@ -275,7 +288,7 @@ class DouyinPushPlugin(Star):
             info["latest_aweme_id"] = latest_aweme_id
             info["latest_publish_time"] = max(last_publish_time, latest_publish_time)
             info["seen_aweme_ids"] = self._merge_seen_aweme_ids(current_ids, known_ids)
-            return None
+            return self._format_no_change_report(nickname, info, "暂无新作品。") if verbose else None
 
         new_items.reverse()
         messages = []
@@ -289,7 +302,21 @@ class DouyinPushPlugin(Star):
         info["latest_aweme_id"] = latest_aweme_id
         info["latest_publish_time"] = max(last_publish_time, latest_publish_time)
         info["seen_aweme_ids"] = self._merge_seen_aweme_ids(current_ids, known_ids)
-        return "\n\n".join(messages)
+        prefix = f"{nickname}：发现 {len(new_items)} 个新作品。"
+        return prefix + "\n" + "\n\n".join(messages)
+
+    def _format_check_overview(self) -> str:
+        users = self._state.get("users", {})
+        return (
+            f"检查完成：监控用户 {len(users)} 个，推送会话 {len(self._state.get('targets', []))} 个，"
+            f"每日总结 {'启用' if self._summary_enabled else '停用'}（{self._summary_time} {self._summary_utc_offset}）。"
+        )
+
+    def _format_no_change_report(self, nickname: str, info: Dict[str, Any], reason: str) -> str:
+        return (
+            f"{nickname}：{reason} 最新发布 {self._format_timestamp(info.get('latest_publish_time'))}，"
+            f"作品 {info.get('latest_aweme_id') or '未初始化'}；{self._format_stats_inline(info.get('latest_stats') or {})}"
+        )
 
     def _sort_awemes_by_publish_time(self, aweme_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return sorted(
@@ -393,19 +420,39 @@ class DouyinPushPlugin(Star):
             raise RuntimeError(data.get("status_msg") or data.get("message") or "Douyin profile API returned non-zero status")
         return data.get("user") or data.get("user_info") or data.get("user_info_v2") or data
 
-    async def _maybe_push_daily_summary(self):
+    async def _maybe_push_daily_summary(self, trigger: str) -> str:
         if not self._summary_enabled:
-            return
+            return "每日总结未发送：配置已停用。" if trigger == "manual_check" else ""
         if not self._is_summary_time_reached():
-            return
-        today = date.today().isoformat()
+            return f"每日总结未发送：尚未到达计划时间 {self._summary_time}({self._summary_utc_offset})。" if trigger == "manual_check" else ""
+        today = self._summary_now().date().isoformat()
         if self._state.get("last_daily_summary_date") == today:
-            return
+            return f"每日总结今日已发送：{today}。" if trigger == "manual_check" else ""
+
+        targets = self._state.get("targets", [])
+        if not targets:
+            message = "每日总结未发送：没有绑定推送会话，请先在目标会话发送 /dy_bind。"
+            logger.warning(message)
+            return message if trigger == "manual_check" else ""
+
         report = self._build_daily_summary(force=True)
+        if not report:
+            message = "每日总结未发送：暂无可总结的主页数据。"
+            logger.warning(message)
+            return message if trigger == "manual_check" else ""
+
+        sent_count = await self._push_text(report)
+        if sent_count <= 0:
+            message = "每日总结发送失败：所有绑定会话推送都失败，今天不会标记为已发送。"
+            logger.error(message)
+            return message if trigger == "manual_check" else ""
+
         self._state["last_daily_summary_date"] = today
+        self._state["last_daily_summary_at"] = datetime.now().isoformat(timespec="seconds")
         self._save_state()
-        if report:
-            await self._push_text(report)
+        message = f"每日总结已发送：成功推送到 {sent_count}/{len(targets)} 个会话。"
+        logger.info(message)
+        return message if trigger == "manual_check" else ""
 
     def _is_summary_time_reached(self) -> bool:
         try:
@@ -414,9 +461,26 @@ class DouyinPushPlugin(Star):
                 raise ValueError
         except ValueError:
             hour, minute = 23, 55
-        now = datetime.now()
+        now = self._summary_now()
         scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return now >= scheduled
+
+    def _summary_now(self) -> datetime:
+        return datetime.now(self._summary_timezone())
+
+    def _summary_timezone(self) -> timezone:
+        match = re.fullmatch(r"([+-])(\d{2}):(\d{2})", self._summary_utc_offset.strip())
+        if not match:
+            return timezone(timedelta(hours=8))
+        sign, hour_text, minute_text = match.groups()
+        hours = int(hour_text)
+        minutes = int(minute_text)
+        if hours > 23 or minutes > 59:
+            return timezone(timedelta(hours=8))
+        delta = timedelta(hours=hours, minutes=minutes)
+        if sign == "-":
+            delta = -delta
+        return timezone(delta)
 
     def _record_profile_stats(self, sec_user_id: str, info: Dict[str, Any], profile: Dict[str, Any]):
         stats = self._extract_profile_stats(profile)
@@ -601,12 +665,15 @@ class DouyinPushPlugin(Star):
             lines.extend(f"- {path}" for path in downloaded)
         return "\n".join(lines)
 
-    async def _push_text(self, text: str):
+    async def _push_text(self, text: str) -> int:
+        sent_count = 0
         for origin in list(self._state.get("targets", [])):
             try:
                 await self.context.send_message(origin, [Comp.Plain(text=text)])
+                sent_count += 1
             except Exception as exc:  # noqa: BLE001 - keep other targets available
                 logger.error(f"push douyin update to {origin} failed: {exc}")
+        return sent_count
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:

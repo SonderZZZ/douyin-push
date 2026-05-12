@@ -49,9 +49,15 @@
   },
   "daily_summary_time": {
     "name": "每日总结时间",
-    "description": "每天推送总结的服务器本地时间，格式 HH:MM。",
+    "description": "每天推送总结的时间，格式 HH:MM；具体时区由 daily_summary_utc_offset 指定。",
     "type": "string",
     "default": "23:55"
+  },
+  "daily_summary_utc_offset": {
+    "name": "每日总结时区偏移",
+    "description": "每日总结时间使用的 UTC 偏移，格式如 +08:00。默认按北京时间判断，避免服务器运行在 UTC 时错过预期时间。",
+    "type": "string",
+    "default": "+08:00"
   },
   "summary_window_days": {
     "name": "总结分析窗口（天）",

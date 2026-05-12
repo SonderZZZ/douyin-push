@@ -50,7 +50,7 @@ https://www.douyin.com/user/MS4wLjABAAAAyyyyyyyyyyyyyyyyyyyy 另一个用户
 
 首次运行默认只记录最新作品，不推送历史内容；如果希望首次也推送拉取到的作品，可开启 `notify_existing_on_first_run`。后续判断更新时不会只看第一条作品 ID，而是按 `create_time` 发布时间排序，并结合 `seen_aweme_ids` 去重；如果作者长期有置顶作品，建议适当调大 `fetch_count` 和 `seen_aweme_history_limit`。
 
-每日总结默认在服务器本地时间 `23:55` 推送到已绑定会话，可通过 `daily_summary_time` 调整；总结会对比 `summary_window_days` 窗口内首次和最新采样，展示关注、粉丝、获赞、作品数的当前值和变化量。
+每日总结默认在 `+08:00` 时区的 `23:55` 推送到已绑定会话，可通过 `daily_summary_time` 和 `daily_summary_utc_offset` 调整；总结会对比 `summary_window_days` 窗口内首次和最新采样，展示关注、粉丝、获赞、作品数的当前值和变化量。请先在需要接收总结的会话发送 `/dy_bind`，否则插件不会把当天标记为已发送；如果错过时间，下一次后台轮询或手动 `/dy_check` 会补发到期总结，并在回复中说明是否已发送、未到时间、已发送或没有绑定会话。
 
 ## 指令
 
@@ -64,7 +64,7 @@ https://www.douyin.com/user/MS4wLjABAAAAyyyyyyyyyyyyyyyyyyyy 另一个用户
 | `/dy_reload_cookie` 或 `/抖音重载Cookie` | 扫码脚本更新 Cookie 文件后，重建 HTTP 客户端。 |
 | `/dy_status` 或 `/抖音状态` | 查看监控状态和最近一次主页数据。 |
 | `/dy_summary` 或 `/抖音总结` | 立即生成一次主页数据总结分析。 |
-| `/dy_check` 或 `/抖音检查` | 立即检查一次，不主动推送到其它会话，只把结果回复当前会话。 |
+| `/dy_check` 或 `/抖音检查` | 立即检查一次，逐个用户回复新作品/无更新/初始化/失败原因，并触发已到期的每日总结补发。 |
 
 ## 数据目录
 
