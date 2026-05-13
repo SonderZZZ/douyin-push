@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 import astrbot.api.message_components as Comp
 from astrbot.api.star import Context, Star, register
 
@@ -23,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.1.6")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.2.0")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -83,6 +83,10 @@ class DouyinPushPlugin(Star):
     @property
     def _manual_check_push_enabled(self) -> bool:
         return bool(self.config.get("manual_check_push_enabled", True))
+
+    @property
+    def _summary_records_retention_days(self) -> int:
+        return max(31, int(self.config.get("summary_records_retention_days", 370)))
 
     @filter.command("dy_bind", alias={"抖音绑定"})
     async def bind_target(self, event: AstrMessageEvent):
@@ -220,7 +224,19 @@ class DouyinPushPlugin(Star):
     async def summary_now(self, event: AstrMessageEvent):
         """立即生成一次主页数据总结分析。"""
         report = self._build_daily_summary(force=True)
+        if report:
+            self._save_state()
         yield event.plain_result(report or "暂无可用于总结的主页数据。")
+
+    @filter.command("dy_weekly_summary", alias={"抖音周总结"})
+    async def weekly_summary(self, event: AstrMessageEvent):
+        """基于每日总结记录生成近 7 天总结。"""
+        yield event.plain_result(self._build_period_summary(days=7, title="抖音主页数据周总结"))
+
+    @filter.command("dy_monthly_summary", alias={"抖音月总结"})
+    async def monthly_summary(self, event: AstrMessageEvent):
+        """基于每日总结记录生成近 30 天总结。"""
+        yield event.plain_result(self._build_period_summary(days=30, title="抖音主页数据月总结"))
 
     @filter.command("dy_check", alias={"抖音检查"})
     async def check_now(self, event: AstrMessageEvent):
@@ -323,13 +339,13 @@ class DouyinPushPlugin(Star):
         push_success_total = 0
         push_attempt_total = 0
         for item in new_items:
-            downloaded = await self._download_aweme(item) if bool(self.config.get("download_enabled", True)) else []
+            downloaded = await self._download_aweme(item) if (push or bool(self.config.get("download_enabled", True))) else []
             text = self._format_aweme_message(nickname, item, downloaded)
             messages.append(text)
             if push:
                 target_count = len(self._state.get("targets", []))
                 push_attempt_total += target_count
-                push_success_total += await self._push_text(text)
+                push_success_total += await self._push_aweme_message(text, downloaded)
 
         prefix = f"{nickname}：发现 {len(new_items)} 个新作品。"
         if push:
@@ -565,7 +581,7 @@ class DouyinPushPlugin(Star):
         if nickname:
             info["nickname"] = nickname
 
-        now = datetime.now()
+        now = self._summary_now()
         entry = {
             "ts": int(now.timestamp()),
             "date": now.date().isoformat(),
@@ -595,29 +611,132 @@ class DouyinPushPlugin(Star):
         return [entry for entry in history if int(entry.get("ts") or 0) >= cutoff_ts]
 
     def _build_daily_summary(self, force: bool) -> str:
-        users: Dict[str, Any] = self._state.get("users", {})
-        window_days = max(1, int(self.config.get("summary_window_days", 1)))
-        cutoff = datetime.now() - timedelta(days=window_days)
-        cutoff_ts = int(cutoff.timestamp())
-        lines = [f"抖音主页数据每日总结（近 {window_days} 天）"]
+        today = self._summary_now().date()
+        yesterday = today - timedelta(days=1)
+        lines = [f"抖音主页数据每日总结（{today.isoformat()}，对比昨日 {yesterday.isoformat()}）"]
+        records: List[Dict[str, Any]] = []
         has_data = False
-        for sec_user_id, info in users.items():
-            history = [entry for entry in info.get("stat_history", []) if int(entry.get("ts") or 0) >= cutoff_ts]
-            if len(history) < 2:
-                latest = info.get("latest_stats") or {}
-                if force and latest:
-                    lines.append(f"- {info.get('nickname', sec_user_id[-8:])}: {self._format_stats_inline(latest)}；暂无足够历史数据计算趋势")
-                    has_data = True
+        for sec_user_id, info in self._state.get("users", {}).items():
+            today_entry = self._latest_stat_for_date(info, today.isoformat()) or info.get("latest_stats") or {}
+            yesterday_entry = self._latest_stat_for_date(info, yesterday.isoformat())
+            if not today_entry:
                 continue
-
-            first = min(history, key=lambda item: int(item.get("ts") or 0))
-            last = max(history, key=lambda item: int(item.get("ts") or 0))
-            lines.append(self._format_user_summary(info.get("nickname", sec_user_id[-8:]), first, last))
+            nickname = info.get("nickname", sec_user_id[-8:])
+            lines.append(self._format_user_summary(nickname, yesterday_entry or {}, today_entry))
+            records.append(
+                {
+                    "sec_user_id": sec_user_id,
+                    "nickname": nickname,
+                    "date": today.isoformat(),
+                    "baseline_date": yesterday.isoformat(),
+                    "current": self._compact_stats(today_entry),
+                    "baseline": self._compact_stats(yesterday_entry or {}),
+                    "delta": self._stats_delta(yesterday_entry or {}, today_entry),
+                }
+            )
             has_data = True
 
         if not has_data:
-            return "" if not force else "暂无可用于总结的主页数据；请等待至少两次监控采样后再生成趋势分析。"
+            return "" if not force else "暂无可用于总结的主页数据；请等待至少一次主页数据采样后再生成总结。"
+
+        self._record_daily_summary(today.isoformat(), yesterday.isoformat(), "\n".join(lines), records)
         return "\n".join(lines)
+
+    def _latest_stat_for_date(self, info: Dict[str, Any], day: str) -> Optional[Dict[str, Any]]:
+        entries = [entry for entry in info.get("stat_history", []) if entry.get("date") == day]
+        if not entries:
+            return None
+        return max(entries, key=lambda item: int(item.get("ts") or 0))
+
+    def _record_daily_summary(self, day: str, baseline_day: str, text: str, users: List[Dict[str, Any]]):
+        records: Dict[str, Any] = self._state.setdefault("daily_summary_records", {})
+        records[day] = {
+            "date": day,
+            "baseline_date": baseline_day,
+            "generated_at": self._summary_now().isoformat(timespec="seconds"),
+            "text": text,
+            "users": users,
+        }
+        self._trim_daily_summary_records()
+
+    def _trim_daily_summary_records(self):
+        records: Dict[str, Any] = self._state.setdefault("daily_summary_records", {})
+        cutoff = self._summary_now().date() - timedelta(days=self._summary_records_retention_days)
+        for day in list(records.keys()):
+            try:
+                day_date = datetime.strptime(day, "%Y-%m-%d").date()
+            except ValueError:
+                records.pop(day, None)
+                continue
+            if day_date < cutoff:
+                records.pop(day, None)
+
+    def _build_period_summary(self, days: int, title: str) -> str:
+        records: Dict[str, Any] = self._state.get("daily_summary_records", {})
+        if not records:
+            return "暂无每日总结记录；请先等待每日总结生成。"
+        end_day = self._summary_now().date()
+        start_day = end_day - timedelta(days=days - 1)
+        selected = []
+        for day, record in records.items():
+            try:
+                day_date = datetime.strptime(day, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if start_day <= day_date <= end_day:
+                selected.append(record)
+        if not selected:
+            return f"暂无近 {days} 天每日总结记录。"
+        selected.sort(key=lambda record: record.get("date", ""))
+
+        aggregate: Dict[str, Dict[str, Any]] = {}
+        for record in selected:
+            for user in record.get("users", []):
+                key = user.get("sec_user_id") or user.get("nickname") or "unknown"
+                item = aggregate.setdefault(
+                    key,
+                    {"nickname": user.get("nickname", key), "delta": {}, "latest": {}},
+                )
+                item["latest"] = user.get("current", {}) or item["latest"]
+                for stat_key, value in (user.get("delta") or {}).items():
+                    if value is not None:
+                        item["delta"][stat_key] = item["delta"].get(stat_key, 0) + value
+
+        lines = [f"{title}（{start_day.isoformat()} ~ {end_day.isoformat()}，基于 {len(selected)} 条每日记录）"]
+        for item in aggregate.values():
+            lines.append(self._format_period_user_summary(item["nickname"], item.get("latest", {}), item.get("delta", {})))
+        return "\n".join(lines)
+
+    def _format_period_user_summary(self, nickname: str, latest: Dict[str, Any], delta: Dict[str, Any]) -> str:
+        parts = []
+        for key, label in (
+            ("following_count", "关注"),
+            ("follower_count", "粉丝"),
+            ("total_favorited", "获赞"),
+            ("aweme_count", "作品"),
+        ):
+            current = latest.get(key)
+            change = delta.get(key)
+            if current is None and change is None:
+                continue
+            parts.append(f"{label} {self._format_number(current)}（累计 {self._format_delta(change)}）")
+        return f"- {nickname}: " + "，".join(parts)
+
+    def _compact_stats(self, stats: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        return {
+            "following_count": self._to_int(stats.get("following_count")),
+            "follower_count": self._to_int(stats.get("follower_count")),
+            "total_favorited": self._to_int(stats.get("total_favorited")),
+            "aweme_count": self._to_int(stats.get("aweme_count")),
+        }
+
+    def _stats_delta(self, baseline: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        return {
+            "following_count": self._delta(baseline.get("following_count"), current.get("following_count")),
+            "follower_count": self._delta(baseline.get("follower_count"), current.get("follower_count")),
+            "total_favorited": self._delta(baseline.get("total_favorited"), current.get("total_favorited")),
+            "aweme_count": self._delta(baseline.get("aweme_count"), current.get("aweme_count")),
+        }
 
     def _format_user_summary(self, nickname: str, first: Dict[str, Any], last: Dict[str, Any]) -> str:
         parts = []
@@ -708,12 +827,34 @@ class DouyinPushPlugin(Star):
 
     def _media_urls(self, item: Dict[str, Any]) -> List[str]:
         urls: List[str] = []
-        video = item.get("video") or {}
-        for key in ("play_addr", "download_addr"):
-            urls.extend((video.get(key) or {}).get("url_list") or [])
-        for image in item.get("images") or []:
-            urls.extend(image.get("url_list") or [])
+        video_urls = self._best_video_urls(item)
+        if video_urls:
+            urls.extend(video_urls[:1])
+        else:
+            for image in item.get("images") or []:
+                urls.extend(image.get("url_list") or [])
         return list(dict.fromkeys(urls))[: int(self.config.get("max_download_files_per_aweme", 10))]
+
+    def _best_video_urls(self, item: Dict[str, Any]) -> List[str]:
+        video = item.get("video") or {}
+        bit_rates = video.get("bit_rate") or []
+        candidates = []
+        for rate in bit_rates:
+            play_addr = rate.get("play_addr") or {}
+            url_list = play_addr.get("url_list") or []
+            if not url_list:
+                continue
+            quality_score = self._to_int(rate.get("bit_rate")) or self._to_int(rate.get("quality_type")) or 0
+            size_score = self._to_int(play_addr.get("data_size")) or self._to_int(rate.get("data_size")) or 0
+            candidates.append((quality_score, size_score, url_list))
+        if candidates:
+            candidates.sort(key=lambda item_: (item_[0], item_[1]), reverse=True)
+            return candidates[0][2]
+
+        urls: List[str] = []
+        for key in ("download_addr", "play_addr"):
+            urls.extend((video.get(key) or {}).get("url_list") or [])
+        return list(dict.fromkeys(urls))
 
     def _format_timestamp(self, value: Any) -> str:
         timestamp = self._to_int(value)
@@ -726,25 +867,34 @@ class DouyinPushPlugin(Star):
         desc = item.get("desc") or "无标题"
         create_time = item.get("create_time")
         publish_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(create_time)) if create_time else "未知"
-        share_url = self._share_url(item, aweme_id)
         lines = [
             f"抖音用户 {nickname} 发布了新作品",
             f"标题：{desc}",
             f"发布时间：{publish_time}",
             f"作品 ID：{aweme_id}",
-            f"链接：{share_url}",
         ]
         if downloaded:
-            lines.append("已下载：")
-            lines.extend(f"- {path}" for path in downloaded)
+            lines.append("已上传最高画质媒体。")
         return "\n".join(lines)
 
     async def _push_text(self, text: str, origins: Optional[List[str]] = None) -> int:
+        return await self._push_components([Comp.Plain(text)], origins=origins)
+
+    async def _push_aweme_message(self, text: str, media_paths: List[str]) -> int:
+        components: List[Any] = [Comp.Plain(text)]
+        for path in media_paths:
+            if path.lower().endswith(".mp4"):
+                components.append(Comp.Video.fromFileSystem(path=path))
+            else:
+                components.append(Comp.Image.fromFileSystem(path))
+        return await self._push_components(components)
+
+    async def _push_components(self, components: List[Any], origins: Optional[List[str]] = None) -> int:
         sent_count = 0
         push_errors: Dict[str, str] = self._state.setdefault("last_push_errors", {})
         for origin in list(origins if origins is not None else self._state.get("targets", [])):
             try:
-                await self._send_active_message(origin, text)
+                await self.context.send_message(origin, components)
                 sent_count += 1
                 push_errors.pop(origin, None)
             except Exception as exc:  # noqa: BLE001 - keep other targets available
@@ -752,13 +902,6 @@ class DouyinPushPlugin(Star):
                 push_errors[origin] = error_text
                 logger.error(f"push douyin update to {origin} failed: {error_text}")
         return sent_count
-
-    async def _send_active_message(self, origin: str, text: str):
-        try:
-            await self.context.send_message(origin, MessageChain().message(text))
-        except Exception as chain_exc:
-            logger.warning(f"send MessageChain to {origin} failed, fallback to plain component list: {chain_exc}")
-            await self.context.send_message(origin, [Comp.Plain(text)])
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:

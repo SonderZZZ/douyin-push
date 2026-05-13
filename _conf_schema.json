@@ -65,11 +65,11 @@
     "type": "string",
     "default": "+08:00"
   },
-  "summary_window_days": {
-    "name": "总结分析窗口（天）",
-    "description": "生成总结时对比最近多少天内的首次和最新采样。",
+  "summary_records_retention_days": {
+    "name": "总结记录保留天数",
+    "description": "每日总结记录保留天数，用于生成周总结和月总结。",
     "type": "int",
-    "default": 1
+    "default": 370
   },
   "profile_stats_retention_days": {
     "name": "主页数据保留天数",
