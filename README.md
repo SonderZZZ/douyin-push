@@ -7,7 +7,7 @@
 - 通过 `sec_user_id` 或抖音用户主页链接添加监控用户。
 - 后台定时检查用户主页最新作品，并按发布时间排序识别更新，避免置顶作品长期占据第一条导致漏推。
 - 支持把当前聊天会话绑定为主动推送目标。
-- 支持下载新作品的视频/图片到 `data/plugins/astrbot_plugin_douyin_push/downloads`（可配置），新作品推送不再附带链接，会直接上传本地最高画质视频/图片。
+- 支持下载新作品的视频/图片到 `data/plugins/astrbot_plugin_douyin_push/downloads`（可配置），新作品推送不再附带链接，会直接上传本地最高画质视频/图片，并尽量把提醒文字和媒体合并在同一条消息链中发送。
 - 同步记录用户主页关注数、粉丝数、获赞数和作品数，并按配置每天定时推送总结分析。
 - 状态保存到 `data/plugins/astrbot_plugin_douyin_push/state.json`，避免插件更新时覆盖数据。
 
