@@ -29,12 +29,6 @@
     "type": "int",
     "default": 300
   },
-  "monitor_heartbeat_seconds": {
-    "name": "后台任务心跳超时（秒）",
-    "description": "超过该时间没有后台心跳时，/dy_status 和 /dy_check 会自动重启监控任务。默认 900 秒。",
-    "type": "int",
-    "default": 900
-  },
   "fetch_count": {
     "name": "每次获取作品数",
     "description": "每个用户每次检查拉取的最新作品数量。",

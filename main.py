@@ -24,7 +24,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.2.2")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.2.1")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -88,10 +88,6 @@ class DouyinPushPlugin(Star):
     @property
     def _summary_records_retention_days(self) -> int:
         return max(31, int(self.config.get("summary_records_retention_days", 370)))
-
-    @property
-    def _monitor_heartbeat_seconds(self) -> int:
-        return max(self._interval * 2, int(self.config.get("monitor_heartbeat_seconds", 900)))
 
     @filter.command("dy_bind", alias={"抖音绑定"})
     async def bind_target(self, event: AstrMessageEvent):
@@ -200,7 +196,6 @@ class DouyinPushPlugin(Star):
     @filter.command("dy_status", alias={"抖音状态"})
     async def status(self, event: AstrMessageEvent):
         """查看抖音监控状态。"""
-        self._ensure_monitor_task()
         users = self._state.get("users", {})
         targets = self._state.get("targets", [])
         lines = [
@@ -261,17 +256,12 @@ class DouyinPushPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     async def _monitor_loop(self):
-        self._state["monitor_started_at"] = datetime.now().isoformat(timespec="seconds")
-        self._save_state()
         await asyncio.sleep(5)
         while self._running:
             try:
-                self._state["monitor_heartbeat_at"] = datetime.now().isoformat(timespec="seconds")
                 await self._check_all_users(push=True, source="monitor")
                 await self._maybe_push_daily_summary(trigger="schedule")
             except Exception as exc:  # noqa: BLE001 - background task must not crash the plugin
-                self._state["last_monitor_exception"] = f"{type(exc).__name__}: {exc}"
-                self._save_state()
                 logger.error(f"Douyin monitor loop failed: {exc}")
             await asyncio.sleep(self._interval)
 
@@ -389,10 +379,7 @@ class DouyinPushPlugin(Star):
             return
         if self._task and not self._task.done():
             self._running = True
-            if not self._monitor_heartbeat_stale():
-                return
-            logger.error("Douyin monitor heartbeat is stale; restarting monitor task")
-            self._task.cancel()
+            return
         if self._task and self._task.done():
             try:
                 self._task.result()
@@ -404,16 +391,6 @@ class DouyinPushPlugin(Star):
         self._task = asyncio.create_task(self._monitor_loop())
         logger.info("DouyinPushPlugin monitor task started")
 
-    def _monitor_heartbeat_stale(self) -> bool:
-        heartbeat = self._state.get("monitor_heartbeat_at")
-        if not heartbeat:
-            return False
-        try:
-            heartbeat_at = datetime.fromisoformat(heartbeat)
-        except ValueError:
-            return False
-        return (datetime.now() - heartbeat_at).total_seconds() > self._monitor_heartbeat_seconds
-
     def _monitor_task_status(self) -> str:
         if not self._enabled:
             return "停用"
@@ -423,8 +400,6 @@ class DouyinPushPlugin(Star):
             return "已取消"
         if self._task.done():
             return "已停止"
-        if self._monitor_heartbeat_stale():
-            return "心跳超时"
         return "运行中"
 
     def _format_no_change_report(self, nickname: str, info: Dict[str, Any], reason: str) -> str:
