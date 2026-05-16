@@ -63,7 +63,7 @@ https://www.douyin.com/user/MS4wLjABAAAAyyyyyyyyyyyyyyyyyyyy 另一个用户
 | `/dy_cookie_status` 或 `/抖音Cookie状态` | 查看 Cookie 配置/文件读取状态。 |
 | `/dy_reload_cookie` 或 `/抖音重载Cookie` | 扫码脚本更新 Cookie 文件后，重建 HTTP 客户端。 |
 | `/dy_push_test` 或 `/抖音推送测试` | 绑定当前会话并立即发送一条主动推送测试，用于排查平台是否支持主动消息。 |
-| `/dy_status` 或 `/抖音状态` | 查看监控状态、后台任务是否运行、上次后台检查结果、最近主动推送错误和最近一次主页数据。 |
+| `/dy_status` 或 `/抖音状态` | 查看监控状态、后台任务是否运行、上次后台检查结果、最近主动推送错误和最近一次主页数据；若后台心跳超时会尝试重启任务。 |
 | `/dy_summary` 或 `/抖音总结` | 立即生成一次只与昨日对比的主页数据每日总结，并写入每日总结记录。 |
 | `/dy_weekly_summary` 或 `/抖音周总结` | 基于保留的每日总结记录生成近 7 天汇总。 |
 | `/dy_monthly_summary` 或 `/抖音月总结` | 基于保留的每日总结记录生成近 30 天汇总。 |
