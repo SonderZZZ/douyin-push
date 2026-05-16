@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import re
 import time
@@ -24,7 +23,7 @@ USER_AGENT = (
 SEC_UID_PATTERN = re.compile(r"MS4wLj[\w\-.~%]+")
 
 
-@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.2.1")
+@register(PLUGIN_NAME, "douyin-push", "监控抖音用户作品更新并主动推送/下载", "1.2.0")
 class DouyinPushPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -807,7 +806,7 @@ class DouyinPushPlugin(Star):
         saved: List[str] = []
         for index, url in enumerate(urls, start=1):
             suffix = ".mp4" if "video" in url or item.get("video") else ".jpg"
-            path = self.download_dir / f"{aweme_id}_{index}_{self._media_file_token(url)}{suffix}"
+            path = self.download_dir / f"{aweme_id}_{index}{suffix}"
             if path.exists():
                 saved.append(str(path))
                 continue
@@ -838,82 +837,24 @@ class DouyinPushPlugin(Star):
 
     def _best_video_urls(self, item: Dict[str, Any]) -> List[str]:
         video = item.get("video") or {}
-        candidates: List[tuple[tuple[int, int, int, int, int], List[str]]] = []
+        bit_rates = video.get("bit_rate") or []
+        candidates = []
+        for rate in bit_rates:
+            play_addr = rate.get("play_addr") or {}
+            url_list = play_addr.get("url_list") or []
+            if not url_list:
+                continue
+            quality_score = self._to_int(rate.get("bit_rate")) or self._to_int(rate.get("quality_type")) or 0
+            size_score = self._to_int(play_addr.get("data_size")) or self._to_int(rate.get("data_size")) or 0
+            candidates.append((quality_score, size_score, url_list))
+        if candidates:
+            candidates.sort(key=lambda item_: (item_[0], item_[1]), reverse=True)
+            return candidates[0][2]
 
-        for rate in video.get("bit_rate") or []:
-            for addr_key in ("play_addr", "download_addr"):
-                addr = rate.get(addr_key) or {}
-                url_list = addr.get("url_list") or []
-                if not url_list:
-                    continue
-                candidates.append((self._video_quality_score(rate, addr, video), url_list))
-
-        for addr_key in ("download_addr", "play_addr"):
-            addr = video.get(addr_key) or {}
-            url_list = addr.get("url_list") or []
-            if url_list:
-                candidates.append((self._video_quality_score({}, addr, video), url_list))
-
-        if not candidates:
-            return []
-
-        candidates.sort(key=lambda item_: item_[0], reverse=True)
-        best_score, best_urls = candidates[0]
-        logger.info(f"selected douyin video quality score={best_score}")
-        return list(dict.fromkeys(best_urls))
-
-    def _video_quality_score(self, rate: Dict[str, Any], addr: Dict[str, Any], video: Dict[str, Any]) -> tuple[int, int, int, int, int]:
-        quality_text = " ".join(
-            str(value or "")
-            for value in (
-                rate.get("gear_name"),
-                rate.get("quality_type"),
-                rate.get("format"),
-                addr.get("uri"),
-                addr.get("url_key"),
-                " ".join(addr.get("url_list") or []),
-            )
-        ).lower()
-        quality_rank = self._quality_rank(quality_text)
-        width = self._pick_int(addr, "width") or self._pick_int(rate, "width") or self._pick_int(video, "width") or 0
-        height = self._pick_int(addr, "height") or self._pick_int(rate, "height") or self._pick_int(video, "height") or 0
-        quality_rank = max(quality_rank, self._resolution_rank(width, height))
-        pixels = width * height
-        bit_rate = self._pick_int(rate, "bit_rate") or 0
-        data_size = self._pick_int(addr, "data_size") or self._pick_int(rate, "data_size") or 0
-        fps = self._pick_int(rate, "fps") or self._pick_int(video, "fps") or 0
-        return (quality_rank, pixels, bit_rate, data_size, fps)
-
-    def _quality_rank(self, text: str) -> int:
-        if any(token in text for token in ("4k", "2160", "uhd")):
-            return 500
-        if any(token in text for token in ("2k", "1440", "qhd")):
-            return 400
-        if any(token in text for token in ("1080", "fhd", "hd_h", "fullhd")):
-            return 300
-        if any(token in text for token in ("720", "hd", "720p")):
-            return 200
-        if any(token in text for token in ("540", "480", "sd")):
-            return 100
-        return 0
-
-    def _resolution_rank(self, width: int, height: int) -> int:
-        long_edge = max(width, height)
-        short_edge = min(width, height)
-        if long_edge >= 3840 or short_edge >= 2160:
-            return 500
-        if long_edge >= 2560 or short_edge >= 1440:
-            return 400
-        if long_edge >= 1920 or short_edge >= 1080:
-            return 300
-        if long_edge >= 1280 or short_edge >= 720:
-            return 200
-        if long_edge >= 854 or short_edge >= 480:
-            return 100
-        return 0
-
-    def _media_file_token(self, url: str) -> str:
-        return hashlib.sha1(url.encode("utf-8")).hexdigest()[:10]
+        urls: List[str] = []
+        for key in ("download_addr", "play_addr"):
+            urls.extend((video.get(key) or {}).get("url_list") or [])
+        return list(dict.fromkeys(urls))
 
     def _format_timestamp(self, value: Any) -> str:
         timestamp = self._to_int(value)
